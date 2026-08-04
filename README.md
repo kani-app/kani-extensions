@@ -44,11 +44,15 @@ extension repository.
 
 ## The `kani-shared` dependency
 
-Each crate depends on `kani-shared` by relative path (`../kani/kani-shared`),
-which is why the sibling checkout matters. That is a stopgap: once
-`kani-shared` is published, this becomes an ordinary version dependency and
-this repository builds standalone, which is what a third-party extension author
-needs. Until then, building requires the server checked out alongside.
+Each crate declares `kani-shared` as a git dependency on the server repository.
+That is what a third-party author will use — but it cannot resolve today,
+because the server repository is private and cargo has no credentials for it.
+The workspace therefore carries a `[patch]` pointing at the sibling checkout,
+which is why the two directories must sit side by side.
+
+Stage 4 publishes `kani-shared` and removes both the patch and the git
+dependency in favour of a plain version dependency. At that point this
+repository builds standalone, with no sibling checkout and no override.
 
 ## YAML extensions
 

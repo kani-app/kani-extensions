@@ -40,3 +40,19 @@ debug-assertions = true
 
 [workspace.lints.clippy]
 unwrap_used = { level = "deny", priority = 1 }
+
+# Until `kani-shared` is published, the git dependency each crate declares cannot
+# resolve: the server repository is private, so cargo has no credentials for it.
+# This override points those crates at the sibling checkout instead — the same
+# two-checkouts-side-by-side arrangement kani-cli's --ext-dir resolution assumes.
+#
+# It goes here rather than in .cargo/config.toml because cargo discovers config
+# from the *current directory*, and kani-cli invokes cargo from the server
+# checkout with --manifest-path pointing here; a config file in this directory
+# would never be read. A [patch] in the workspace manifest always is.
+#
+# Stage 4 removes both this and the git dependency in favour of a plain version
+# dependency, at which point this repository builds standalone — which is what a
+# third-party extension author needs.
+[patch."https://github.com/ArloB/kani"]
+kani-shared = { path = "../kani/kani-shared" }

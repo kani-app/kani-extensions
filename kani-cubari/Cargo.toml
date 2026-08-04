@@ -13,4 +13,4 @@ id = "cubari"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kani-shared = { path = "../kani/kani-shared", features = ["meta"] }
+kani-shared = { git = "https://github.com/ArloB/kani", branch = "develop", features = ["meta"] }
