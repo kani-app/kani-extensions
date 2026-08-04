@@ -1,0 +1,16 @@
+[package]
+name = "kani-weebcentral"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+unwrap_used = { level = "deny", priority = 1 }
+
+[package.metadata]
+id = "weebcentral"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kani-shared = { path = "../kani/kani-shared", features = ["builder"] }

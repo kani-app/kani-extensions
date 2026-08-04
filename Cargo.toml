@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = [
+    "kani-comix",
+    "kani-cubari",
+    "kani-mangadex",
+    "kani-mangapill",
+    "kani-mangapill-gen",
+    "kani-weebcentral",
+]
+
+# These profiles are not optional decoration: `kani-cli build` compiles
+# extensions with `--profile wasm-release` (or `wasm-debug` for `--debug`), so a
+# workspace without them cannot build an extension at all. They are copied from
+# the server workspace and should stay in step with it.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Preserves function names for readable WASM backtraces.
+# Use with: kani-cli build --debug <extension>
+[profile.wasm-debug]
+inherits = "wasm-release"
+opt-level = 1
+lto = "thin"
+debug = true
+strip = "none"
+debug-assertions = true
+
+[workspace.lints.clippy]
+unwrap_used = { level = "deny", priority = 1 }

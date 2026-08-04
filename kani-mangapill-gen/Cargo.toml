@@ -1,0 +1,16 @@
+[package]
+name = "kani-mangapill-gen"
+version = "0.1.0"
+edition = "2021"
+
+[lints.clippy]
+unwrap_used = { level = "deny", priority = 1 }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+kani-shared = { path = "../kani/kani-shared", features = ["meta"] }
+
+[package.metadata]
+id = "mangapill-gen"
