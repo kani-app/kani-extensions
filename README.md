@@ -44,15 +44,18 @@ extension repository.
 
 ## The `kani-shared` dependency
 
-Each crate declares `kani-shared` as a git dependency on the server repository.
-That is what a third-party author will use — but it cannot resolve today,
-because the server repository is private and cargo has no credentials for it.
-The workspace therefore carries a `[patch]` pointing at the sibling checkout,
-which is why the two directories must sit side by side.
+Each crate declares `kani-shared` as a git dependency on the server repository —
+what a third-party author would use. It resolves without credentials now the
+server is public.
 
-Stage 4 publishes `kani-shared` and removes both the patch and the git
-dependency in favour of a plain version dependency. At that point this
-repository builds standalone, with no sibling checkout and no override.
+It does not yet *compile*, because the dependency tracks `develop` and develop
+still carries kani-shared v0.1.0, whose `ChapterInfo` predates `page_count`. The
+workspace therefore carries a `[patch]` onto the sibling checkout, which is why
+the two directories must sit side by side for now.
+
+Delete the patch once the road-to-1.0 branch has landed on develop. Stage 4 then
+publishes `kani-shared` and the git dependency becomes an ordinary version one,
+at which point this repository builds standalone with no sibling checkout.
 
 ## YAML extensions
 

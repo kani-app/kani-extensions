@@ -1,2 +1,7 @@
 /target
 wasm_sources
+
+# The lockfile pins kani-shared to whichever source resolved at the time — the
+# git dependency or the sibling [patch]. Committing it makes a stale pin
+# outlive the switch between them.
+Cargo.lock
