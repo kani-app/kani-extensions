@@ -1,38 +1,11 @@
-# Comix — https://comix.to
-#
-# Every list, chapter list, and page list is served by an API that rejects any
-# request without a `_` token. The token is a keyed substitution cipher over the
-# request's own canonical path and query, so it cannot be replayed onto a
-# different request — but it can be recomputed, given the cipher material.
-#
-# That material is three 256-byte S-boxes and three keys, which the site decodes
-# through `window.atob` as its own scripts start. `harvest_cipher` captures them
-# once in the headless browser; everything after that is ordinary HTTP signed in
-# `pre_request`. The material is static per site build, so a refresh is needed
-# only when the site redeploys — a signed request then fails with
-# `Invalid token.` (distinct from `Missing token.`, which means no `_` at all),
-# and the `on_status` hook drops the cached material and retries.
-#
-# Responses come back as {"e": "<base64url>"} and are unwrapped in `on_status`
-# before the blueprint sees them.
-#
-# The one parameter whose shape differs between the site's browse page and its
-# API is the sort: `sort=score:desc` on the page is `order[score]=desc` here.
-
 id: comix
 name: Comix
 version: "1.2.0"
 base_url: "https://comix.to"
-# Lets a Mihon backup resolve to this source by id rather than by name.
 mihon_source_id: 7537715367149829912
 language: en
-nsfw: false
+nsfw: true
 
-# Page images live on rotating third-party CDN hosts (`*.wowpic1.store`,
-# `*.wowpic2.store`, …) and covers on `static.comix.to`, but those are fetched
-# by the image proxy and the downloader, neither of which consults the
-# extension's host policy. Every URL this extension loads itself is comix.to,
-# so it stays restricted to its own base_url.
 requires_capabilities:
   - browser_payload
 
@@ -40,22 +13,15 @@ get_url: "/title/$manga.slug$"
 
 metadata:
   description: >-
-    Aggregator with a large multi-language catalogue. Its JSON API is
-    token-gated; the token is computed locally, so browsing is plain HTTP.
+    Aggregator with a large multi-language catalogue.
   languages:
     - en
   rate_limit:
-    # Browsing is plain signed HTTP now, so this no longer has to price in a
-    # page load per request. Still modest: the only expensive call left is the
-    # occasional cipher-material refresh, and that is one browser load.
     rps: 3.0
     burst: 6
     max_concurrent: 3
 
 id_encoding:
-  # `slug` is the last path segment of the site's own URL for the entry — it
-  # already embeds the hid ("g2rk-on-the-way-to-meet-mom"), but the hid is kept
-  # separately so any future API route can use it without re-parsing.
   manga:
     fields: [hid, slug]
     delimiter: "|"
@@ -65,29 +31,7 @@ id_encoding:
     delimiter: "|"
     encoding: base64_url
 
-# ---------------------------------------------------------------------------
-# Browser scripts
-#
-# Each runs before any page script (`evaluateOnNewDocument`), hooks the
-# transports the site uses, and hands the first payload it recognises to
-# passPayload(). None of them fabricate a request: the site's own code fetches,
-# tokens and all, and these only read the result.
-#
-# Each also ends the page load once it has what it came for. The solver's
-# navigation does not return until the browser fires `load`, and only then does
-# it start looking for the payload — so an unaided capture costs a *whole* page
-# load even though the JSON arrived long before: two dozen covers on a browse
-# page, a chapter's worth of full-size images on a reader page. endLoad() turns
-# that back into time-to-payload. It waits for DOMContentLoaded first, so a
-# payload read out of the document mid-parse never truncates the document it
-# came from; that still lands ahead of images, fonts, and deferred scripts,
-# which is where the time goes.
-# ---------------------------------------------------------------------------
 browser_scripts:
-  # The only browser work left. The site derives its request-signing material
-  # through `window.atob`, so hooking that captures the three 256-byte S-boxes
-  # and three keys as the page's own scripts decode them. Everything else runs
-  # as plain signed HTTP.
   harvest_cipher: |
     (function () {
         var caps = [];
@@ -131,9 +75,6 @@ browser_scripts:
 
 scripts:
   pure:
-    # `path?a=1&b=2` with parameters sorted and repeated keys indexed, which is
-    # what the server signs. It compares strictly: a prefix or a differently
-    # ordered string is refused.
     comix_canonical: |
       fn comix_canonical(path, queries) {
           let flat = [];
@@ -155,8 +96,6 @@ scripts:
           if qs == "" { path } else { path + "?" + qs }
       }
 
-    # Six base64url blobs: three S-boxes then three keys. Static per site build,
-    # so a long TTL is right and a 403 is what actually invalidates it.
     comix_material: |
       fn comix_material(ctx) {
           let raw = ctx.cache_get("cipher", "material");
@@ -193,9 +132,6 @@ scripts:
           bytes_to_utf8(data)
       }
 
-# Signs every request. The `sort` filter is the one parameter whose shape
-# differs between the browse page and the API: `score:desc` becomes
-# `order[score]=desc`.
 pre_request: |
   req.remove_query("_");
 
@@ -223,8 +159,6 @@ pre_request: |
   proceed()
 
 on_status:
-  # Payloads arrive as {"e": "<base64url>"}. Unwrapped here so the blueprint
-  # below sees ordinary JSON.
   "2xx": |
     let marker = resp.body.index_of("\"e\"");
     if marker >= 0 {
@@ -239,9 +173,6 @@ on_status:
     }
     proceed()
 
-  # Either the material is stale after a site rebuild or the canonical form is
-  # wrong; both read as `Invalid token.` here. Dropping it and retrying fixes
-  # the first, and the host's own hook-retry cap stops the second from looping.
   "403": |
     ctx.cache_delete("cipher", "material");
     retry()
@@ -251,11 +182,7 @@ endpoints:
     route: "/api/v1/manga"
     type: json
     queries:
-      # Fixed here rather than mapped, so "popular" always means highest rated,
-      # and the sort filter stays unmapped for this endpoint.
       "order[score]": "desc"
-      # Fixed at the API's ceiling; the host maps the reader's page and page
-      # size onto these native pages and merges the chunks.
       limit: "100"
     pagination:
       native_page_size: 100
@@ -282,8 +209,6 @@ endpoints:
     has_next_page: 'json("/result/meta/hasNext").bool().fallback(false)'
     total_pages: 'json("/result/meta/lastPage").int()'
     scalars:
-      # The host pages at the reader's size, not the source's, so it needs the
-      # item count to work out how many pages that is.
       total_items: 'json("/result/meta/total").int()'
     fields:
       id:
@@ -291,7 +216,6 @@ endpoints:
         slug: 'self.ptr("/url").str().split("/").at(-1)'
       title: 'self.ptr("/title").str()'
       cover_url:
-        # The list payload carries `medium` and `large` only.
         expr: |
           self.ptr("/poster").get(pref("cover_size").fallback("large")).str()
             .fallback(self.ptr("/poster/large").str())
@@ -329,8 +253,6 @@ endpoints:
     has_next_page: 'json("/result/meta/hasNext").bool().fallback(false)'
     total_pages: 'json("/result/meta/lastPage").int()'
     scalars:
-      # The host pages at the reader's size, not the source's, so it needs the
-      # item count to work out how many pages that is.
       total_items: 'json("/result/meta/total").int()'
     fields:
       id:
@@ -359,8 +281,6 @@ endpoints:
           "not_yet_released": "hiatus"
         }).fallback("unknown")
       description:
-        # Alternative titles and catalogue facts are opt-in: they are useful for
-        # disambiguating licensed re-releases but bury the synopsis when on.
         expr: |
           let $synopsis = self.ptr("/synopsis").str().fallback("");
           let $alts = if pref("alt_titles_in_description") == "true"
@@ -393,7 +313,6 @@ endpoints:
         expr: 'self.ptr("/artists").map($item.ptr("/title").str()).join(", ")'
         optional: true
       tags:
-        # The site splits its taxonomy four ways; the reader shows one tag list.
         expr: |
           merge([
             self.ptr("/genres").map($item.ptr("/title").str()),
@@ -419,8 +338,6 @@ endpoints:
     has_next_page: 'json("/result/meta/hasNext").bool().fallback(false)'
     total_pages: 'json("/result/meta/lastPage").int()'
     scalars:
-      # The host pages at the reader's size, not the source's, so it needs the
-      # item count to work out how many pages that is.
       total_items: 'json("/result/meta/total").int()'
     fields:
       id:
@@ -431,7 +348,6 @@ endpoints:
         expr: 'self.ptr("/name").str()'
         optional: true
       volume:
-        # Volume 0 means "no volume" here, not "volume zero".
         expr: 'let $v = self.ptr("/volume").int(); if $v > 0 then $v else null'
         optional: true
       scanlator:
@@ -440,8 +356,6 @@ endpoints:
             .fallback(if self.ptr("/isOfficial").bool() then "Official" else null)
         optional: true
       date_uploaded:
-        # The payload only ever carries a relative string ("3d ago"), which the
-        # DSL has no clock to resolve against. Left unset rather than guessed.
         expr: "null"
         optional: true
       language: 'self.ptr("/language").str().fallback("en")'
@@ -453,21 +367,14 @@ endpoints:
     fields:
       index: "index()"
       url:
-        # Page URLs are absolute today and `baseUrl` comes back empty; resolving
-        # against it anyway keeps a switch back to relative paths working.
         expr: |
           self.ptr("/url").str()
             .resolve_url(json("/result/pages/baseUrl").str().fallback("https://comix.to/"))
       transform:
-        # Inert unless the CDN answers with an `x-scramble-seed` header, which
-        # no title currently does — the source has shipped tile-scrambled pages
-        # before, and this costs nothing while it is not doing so.
         expr: '"lcg-tile-5x5-from-header"'
         optional: true
 
 option_sets:
-  # Ids are the site's own taxonomy ids, taken from the browse page's
-  # `initial-data.list.options`. They are stable; the labels follow the site's.
   genres:
     - name: "Action"
       value: "6"
@@ -622,8 +529,6 @@ filters:
       name: "Best match"
       value: "relevance:desc"
 
-  # The site takes a comma-separated list and treats it as the set of ratings to
-  # show, so each option spells out the whole set it means.
   - id: content_rating
     name: Content rating
     type: select
@@ -667,8 +572,6 @@ filters:
     type: multiselect
     options_ref: genres
 
-  # Genres and formats are one namespace on the wire — both map to
-  # `genres_in[]` / `genres_ex[]` — but the site presents them separately.
   - id: formats_include
     name: Formats include
     type: multiselect
