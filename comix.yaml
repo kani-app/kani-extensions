@@ -1,0 +1,732 @@
+# Comix — https://comix.to
+#
+# Every list, chapter list, and page list is served by an API that rejects any
+# request without a `_` token. The token is a keyed substitution cipher over the
+# request's own canonical path and query, so it cannot be replayed onto a
+# different request — but it can be recomputed, given the cipher material.
+#
+# That material is three 256-byte S-boxes and three keys, which the site decodes
+# through `window.atob` as its own scripts start. `harvest_cipher` captures them
+# once in the headless browser; everything after that is ordinary HTTP signed in
+# `pre_request`. The material is static per site build, so a refresh is needed
+# only when the site redeploys — a signed request then fails with
+# `Invalid token.` (distinct from `Missing token.`, which means no `_` at all),
+# and the `on_status` hook drops the cached material and retries.
+#
+# Responses come back as {"e": "<base64url>"} and are unwrapped in `on_status`
+# before the blueprint sees them.
+#
+# The one parameter whose shape differs between the site's browse page and its
+# API is the sort: `sort=score:desc` on the page is `order[score]=desc` here.
+
+id: comix
+name: Comix
+version: "1.2.0"
+base_url: "https://comix.to"
+# Lets a Mihon backup resolve to this source by id rather than by name.
+mihon_source_id: 7537715367149829912
+language: en
+nsfw: false
+
+# Page images live on rotating third-party CDN hosts (`*.wowpic1.store`,
+# `*.wowpic2.store`, …) and covers on `static.comix.to`, but those are fetched
+# by the image proxy and the downloader, neither of which consults the
+# extension's host policy. Every URL this extension loads itself is comix.to,
+# so it stays restricted to its own base_url.
+requires_capabilities:
+  - browser_payload
+
+get_url: "/title/$manga.slug$"
+
+metadata:
+  description: >-
+    Aggregator with a large multi-language catalogue. Its JSON API is
+    token-gated; the token is computed locally, so browsing is plain HTTP.
+  languages:
+    - en
+  rate_limit:
+    # Browsing is plain signed HTTP now, so this no longer has to price in a
+    # page load per request. Still modest: the only expensive call left is the
+    # occasional cipher-material refresh, and that is one browser load.
+    rps: 3.0
+    burst: 6
+    max_concurrent: 3
+
+id_encoding:
+  # `slug` is the last path segment of the site's own URL for the entry — it
+  # already embeds the hid ("g2rk-on-the-way-to-meet-mom"), but the hid is kept
+  # separately so any future API route can use it without re-parsing.
+  manga:
+    fields: [hid, slug]
+    delimiter: "|"
+    encoding: base64_url
+  chapter:
+    fields: [id, slug]
+    delimiter: "|"
+    encoding: base64_url
+
+# ---------------------------------------------------------------------------
+# Browser scripts
+#
+# Each runs before any page script (`evaluateOnNewDocument`), hooks the
+# transports the site uses, and hands the first payload it recognises to
+# passPayload(). None of them fabricate a request: the site's own code fetches,
+# tokens and all, and these only read the result.
+#
+# Each also ends the page load once it has what it came for. The solver's
+# navigation does not return until the browser fires `load`, and only then does
+# it start looking for the payload — so an unaided capture costs a *whole* page
+# load even though the JSON arrived long before: two dozen covers on a browse
+# page, a chapter's worth of full-size images on a reader page. endLoad() turns
+# that back into time-to-payload. It waits for DOMContentLoaded first, so a
+# payload read out of the document mid-parse never truncates the document it
+# came from; that still lands ahead of images, fonts, and deferred scripts,
+# which is where the time goes.
+# ---------------------------------------------------------------------------
+browser_scripts:
+  # The only browser work left. The site derives its request-signing material
+  # through `window.atob`, so hooking that captures the three 256-byte S-boxes
+  # and three keys as the page's own scripts decode them. Everything else runs
+  # as plain signed HTTP.
+  harvest_cipher: |
+    (function () {
+        var caps = [];
+        var originalAtob = window.atob.bind(window);
+        window.atob = function (value) {
+            var decoded = originalAtob(value);
+            try {
+                var bytes = [];
+                for (var i = 0; i < decoded.length; i++) {
+                    bytes.push(decoded.charCodeAt(i) & 255);
+                }
+                if (bytes.length === 256 || bytes.length === 24 || bytes.length === 32) {
+                    caps.push(bytes);
+                }
+            } catch (e) {}
+            return decoded;
+        };
+
+        function b64url(bytes) {
+            var s = '';
+            for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+            return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        var started = Date.now();
+        var tick = setInterval(function () {
+            var sboxes = caps.filter(function (c) { return c.length === 256; }).slice(0, 3);
+            var keys = caps.filter(function (c) {
+                return c.length === 24 || c.length === 32;
+            }).slice(0, 3);
+            if (sboxes.length === 3 && keys.length === 3) {
+                clearInterval(tick);
+                passPayload(sboxes.concat(keys).map(b64url).join('.'));
+            } else if (Date.now() - started > 45000) {
+                clearInterval(tick);
+            } else {
+                resetPayloadTimer();
+            }
+        }, 250);
+    })();
+
+scripts:
+  pure:
+    # `path?a=1&b=2` with parameters sorted and repeated keys indexed, which is
+    # what the server signs. It compares strictly: a prefix or a differently
+    # ordered string is refused.
+    comix_canonical: |
+      fn comix_canonical(path, queries) {
+          let flat = [];
+          let counters = #{};
+          for pair in queries {
+              let k = pair[0];
+              if k.ends_with("[]") {
+                  let base = k.sub_string(0, k.len() - 2);
+                  let n = if counters.contains(base) { counters[base] } else { 0 };
+                  counters[base] = n + 1;
+                  flat.push(base + "[" + n + "]=" + pair[1]);
+              } else {
+                  flat.push(k + "=" + pair[1]);
+              }
+          }
+          flat.sort(|a, b| if a < b { -1 } else if a > b { 1 } else { 0 });
+          let qs = "";
+          for part in flat { qs = if qs == "" { part } else { qs + "&" + part }; }
+          if qs == "" { path } else { path + "?" + qs }
+      }
+
+    # Six base64url blobs: three S-boxes then three keys. Static per site build,
+    # so a long TTL is right and a 403 is what actually invalidates it.
+    comix_material: |
+      fn comix_material(ctx) {
+          let raw = ctx.cache_get("cipher", "material");
+          if raw == () {
+              raw = ctx.capture_page_payload(
+                  "https://comix.to/browse", "harvest_cipher", 45000, false
+              );
+              ctx.cache_put("cipher", "material", raw, 604800);
+          }
+          let out = [];
+          for part in raw.split(".") { out.push(bytes_from_base64url(part)); }
+          out
+      }
+
+    comix_sign: |
+      fn comix_sign(material, canonical) {
+          let seeds = [189, 133, 32];
+          let data = bytes_from_utf8(canonical);
+          for round in 0..3 {
+              data = bytes_substitute(data, material[round], material[round + 3], seeds[round], false);
+          }
+          bytes_to_base64url(data)
+      }
+
+    comix_decrypt: |
+      fn comix_decrypt(material, payload) {
+          let seeds = [189, 133, 32];
+          let data = bytes_from_base64url(payload);
+          let round = 2;
+          while round >= 0 {
+              data = bytes_substitute(data, material[round], material[round + 3], seeds[round], true);
+              round -= 1;
+          }
+          bytes_to_utf8(data)
+      }
+
+# Signs every request. The `sort` filter is the one parameter whose shape
+# differs between the browse page and the API: `score:desc` becomes
+# `order[score]=desc`.
+pre_request: |
+  req.remove_query("_");
+
+  // `content_rating` is a select whose values are comma-joined for the browse
+  // page; the API wants a repeated array.
+  let rating = ();
+  for pair in req.queries { if pair[0] == "content_rating" { rating = pair[1]; } }
+  if rating != () {
+      req.remove_query("content_rating");
+      for value in rating.split(",") { req.push_query("content_rating[]", value); }
+  }
+
+  let sort_value = ();
+  for pair in req.queries { if pair[0] == "sort" { sort_value = pair[1]; } }
+  if sort_value != () {
+      req.remove_query("sort");
+      let bits = sort_value.split(":");
+      let direction = if bits.len() > 1 { bits[1] } else { "desc" };
+      req.push_query("order[" + bits[0] + "]", direction);
+  }
+
+  let marker = req.url.index_of("/api/v1");
+  let path = if marker >= 0 { req.url.sub_string(marker + 7) } else { req.url };
+  req.push_query("_", comix_sign(comix_material(ctx), comix_canonical(path, req.queries)));
+  proceed()
+
+on_status:
+  # Payloads arrive as {"e": "<base64url>"}. Unwrapped here so the blueprint
+  # below sees ordinary JSON.
+  "2xx": |
+    let marker = resp.body.index_of("\"e\"");
+    if marker >= 0 {
+        let open = resp.body.index_of("\"", marker + 3);
+        if open >= 0 {
+            let close = resp.body.index_of("\"", open + 1);
+            if close > open {
+                let payload = resp.body.sub_string(open + 1, close - open - 1);
+                resp.body = comix_decrypt(comix_material(ctx), payload);
+            }
+        }
+    }
+    proceed()
+
+  # Either the material is stale after a site rebuild or the canonical form is
+  # wrong; both read as `Invalid token.` here. Dropping it and retrying fixes
+  # the first, and the host's own hook-retry cap stops the second from looping.
+  "403": |
+    ctx.cache_delete("cipher", "material");
+    retry()
+
+endpoints:
+  popular:
+    route: "/api/v1/manga"
+    type: json
+    queries:
+      # Fixed here rather than mapped, so "popular" always means highest rated,
+      # and the sort filter stays unmapped for this endpoint.
+      "order[score]": "desc"
+      # Fixed at the API's ceiling; the host maps the reader's page and page
+      # size onto these native pages and merges the chunks.
+      limit: "100"
+    pagination:
+      native_page_size: 100
+      offset_param: page
+      offset_type: page
+    filter_mapping:
+      content_rating: content_rating
+      types: types
+      demographics: demographics
+      statuses: statuses
+      genres_include: genres_in
+      genres_exclude: genres_ex
+      formats_include: genres_in
+      formats_exclude: genres_ex
+      genres_mode: genres_mode
+      min_chapters: min_chap
+      year_range:
+        kind: tuple_split
+        from_param: year_from
+        to_param: year_to
+    filter_format:
+      multiselect: bracket
+    container: "/result/items"
+    has_next_page: 'json("/result/meta/hasNext").bool().fallback(false)'
+    total_pages: 'json("/result/meta/lastPage").int()'
+    scalars:
+      # The host pages at the reader's size, not the source's, so it needs the
+      # item count to work out how many pages that is.
+      total_items: 'json("/result/meta/total").int()'
+    fields:
+      id:
+        hid: 'self.ptr("/hid").str()'
+        slug: 'self.ptr("/url").str().split("/").at(-1)'
+      title: 'self.ptr("/title").str()'
+      cover_url:
+        # The list payload carries `medium` and `large` only.
+        expr: |
+          self.ptr("/poster").get(pref("cover_size").fallback("large")).str()
+            .fallback(self.ptr("/poster/large").str())
+        optional: true
+
+  search:
+    route: "/api/v1/manga"
+    type: json
+    queries:
+      keyword: $query$
+      limit: "100"
+    pagination:
+      native_page_size: 100
+      offset_param: page
+      offset_type: page
+    filter_mapping:
+      sort: sort
+      content_rating: content_rating
+      types: types
+      demographics: demographics
+      statuses: statuses
+      genres_include: genres_in
+      genres_exclude: genres_ex
+      formats_include: genres_in
+      formats_exclude: genres_ex
+      genres_mode: genres_mode
+      min_chapters: min_chap
+      year_range:
+        kind: tuple_split
+        from_param: year_from
+        to_param: year_to
+    filter_format:
+      multiselect: bracket
+    container: "/result/items"
+    has_next_page: 'json("/result/meta/hasNext").bool().fallback(false)'
+    total_pages: 'json("/result/meta/lastPage").int()'
+    scalars:
+      # The host pages at the reader's size, not the source's, so it needs the
+      # item count to work out how many pages that is.
+      total_items: 'json("/result/meta/total").int()'
+    fields:
+      id:
+        hid: 'self.ptr("/hid").str()'
+        slug: 'self.ptr("/url").str().split("/").at(-1)'
+      title: 'self.ptr("/title").str()'
+      cover_url:
+        expr: |
+          self.ptr("/poster").get(pref("cover_size").fallback("large")).str()
+            .fallback(self.ptr("/poster/large").str())
+        optional: true
+
+  manga_details:
+    route: "/api/v1/manga/$manga.hid$"
+    type: json
+    container: "/result"
+    fields:
+      id: '"$manga_id$"'
+      title: 'self.ptr("/title").str()'
+      status: |
+        self.ptr("/status").str().lookup({
+          "releasing": "ongoing",
+          "finished": "completed",
+          "on_hiatus": "hiatus",
+          "discontinued": "cancelled",
+          "not_yet_released": "hiatus"
+        }).fallback("unknown")
+      description:
+        # Alternative titles and catalogue facts are opt-in: they are useful for
+        # disambiguating licensed re-releases but bury the synopsis when on.
+        expr: |
+          let $synopsis = self.ptr("/synopsis").str().fallback("");
+          let $alts = if pref("alt_titles_in_description") == "true"
+            then self.ptr("/altTitles").map($item.str()).join("\n").fallback("")
+            else "";
+          let $facts = if pref("extra_info_in_description") == "true"
+            then merge([
+              [format("Year: {}", self.ptr("/year").int().to_string())],
+              [format("Rating: {} from {} ratings",
+                      self.ptr("/ratedAvg").float().to_string(),
+                      self.ptr("/ratedCount").int().to_string())],
+              [format("Followed by: {}", self.ptr("/followsTotal").int().to_string())]
+            ]).join("\n")
+            else "";
+          merge([
+            [$synopsis],
+            [if $alts == "" then "" else format("Alternative names:\n{}", $alts)],
+            [$facts]
+          ]).filter($item != "").join("\n\n")
+        optional: true
+      cover_url:
+        expr: |
+          self.ptr("/poster").get(pref("cover_size").fallback("large")).str()
+            .fallback(self.ptr("/poster/large").str())
+        optional: true
+      authors:
+        expr: 'self.ptr("/authors").map($item.ptr("/title").str()).join(", ")'
+        optional: true
+      artists:
+        expr: 'self.ptr("/artists").map($item.ptr("/title").str()).join(", ")'
+        optional: true
+      tags:
+        # The site splits its taxonomy four ways; the reader shows one tag list.
+        expr: |
+          merge([
+            self.ptr("/genres").map($item.ptr("/title").str()),
+            self.ptr("/demographics").map($item.ptr("/title").str()),
+            self.ptr("/formats").map($item.ptr("/title").str()),
+            if pref("tags_in_genres") == "true"
+              then self.ptr("/tags").map($item.ptr("/title").str())
+              else []
+          ]).unique().join(", ")
+        optional: true
+
+  chapter_list:
+    route: "/api/v1/manga/$manga.hid$/chapters"
+    type: json
+    queries:
+      "order[number]": "desc"
+      limit: "100"
+    pagination:
+      native_page_size: 100
+      offset_param: page
+      offset_type: page
+    container: "/result/items"
+    has_next_page: 'json("/result/meta/hasNext").bool().fallback(false)'
+    total_pages: 'json("/result/meta/lastPage").int()'
+    scalars:
+      # The host pages at the reader's size, not the source's, so it needs the
+      # item count to work out how many pages that is.
+      total_items: 'json("/result/meta/total").int()'
+    fields:
+      id:
+        id: 'self.ptr("/id").int().to_string()'
+        slug: 'self.ptr("/url").str().split("/").at(-1)'
+      number: 'self.ptr("/number").float().fallback(0.0)'
+      title:
+        expr: 'self.ptr("/name").str()'
+        optional: true
+      volume:
+        # Volume 0 means "no volume" here, not "volume zero".
+        expr: 'let $v = self.ptr("/volume").int(); if $v > 0 then $v else null'
+        optional: true
+      scanlator:
+        expr: |
+          self.ptr("/group/name").str()
+            .fallback(if self.ptr("/isOfficial").bool() then "Official" else null)
+        optional: true
+      date_uploaded:
+        # The payload only ever carries a relative string ("3d ago"), which the
+        # DSL has no clock to resolve against. Left unset rather than guessed.
+        expr: "null"
+        optional: true
+      language: 'self.ptr("/language").str().fallback("en")'
+
+  pages:
+    route: "/api/v1/chapters/$chapter.id$"
+    type: json
+    container: "/result/pages/items"
+    fields:
+      index: "index()"
+      url:
+        # Page URLs are absolute today and `baseUrl` comes back empty; resolving
+        # against it anyway keeps a switch back to relative paths working.
+        expr: |
+          self.ptr("/url").str()
+            .resolve_url(json("/result/pages/baseUrl").str().fallback("https://comix.to/"))
+      transform:
+        # Inert unless the CDN answers with an `x-scramble-seed` header, which
+        # no title currently does — the source has shipped tile-scrambled pages
+        # before, and this costs nothing while it is not doing so.
+        expr: '"lcg-tile-5x5-from-header"'
+        optional: true
+
+option_sets:
+  # Ids are the site's own taxonomy ids, taken from the browse page's
+  # `initial-data.list.options`. They are stable; the labels follow the site's.
+  genres:
+    - name: "Action"
+      value: "6"
+    - name: "Adult"
+      value: "87264"
+      nsfw: true
+    - name: "Adventure"
+      value: "7"
+    - name: "Boys Love"
+      value: "8"
+    - name: "Comedy"
+      value: "9"
+    - name: "Crime"
+      value: "10"
+    - name: "Drama"
+      value: "11"
+    - name: "Ecchi"
+      value: "87265"
+      nsfw: true
+    - name: "Fantasy"
+      value: "12"
+    - name: "Girls Love"
+      value: "13"
+    - name: "Harem"
+      value: "40"
+    - name: "Hentai"
+      value: "87266"
+      nsfw: true
+    - name: "Historical"
+      value: "14"
+    - name: "Horror"
+      value: "15"
+    - name: "Isekai"
+      value: "16"
+    - name: "Magical Girls"
+      value: "17"
+    - name: "Mature"
+      value: "87267"
+      nsfw: true
+    - name: "Mecha"
+      value: "18"
+    - name: "Medical"
+      value: "19"
+    - name: "Mystery"
+      value: "20"
+    - name: "Philosophical"
+      value: "21"
+    - name: "Psychological"
+      value: "22"
+    - name: "Romance"
+      value: "23"
+    - name: "Sci-Fi"
+      value: "24"
+    - name: "Slice of Life"
+      value: "25"
+    - name: "Smut"
+      value: "87268"
+      nsfw: true
+    - name: "Sports"
+      value: "26"
+    - name: "Superhero"
+      value: "27"
+    - name: "Thriller"
+      value: "28"
+    - name: "Tragedy"
+      value: "29"
+    - name: "Wuxia"
+      value: "30"
+
+  formats:
+    - name: "4-Koma"
+      value: "93164"
+    - name: "Adaptation"
+      value: "93167"
+    - name: "Anthology"
+      value: "93165"
+    - name: "Award Winning"
+      value: "93166"
+    - name: "Doujinshi"
+      value: "93168"
+    - name: "Full Color"
+      value: "93172"
+    - name: "Long Strip"
+      value: "93170"
+    - name: "Oneshot"
+      value: "93169"
+    - name: "Web Comic"
+      value: "93171"
+
+  demographics:
+    - name: "Josei"
+      value: "3"
+    - name: "Seinen"
+      value: "4"
+    - name: "Shoujo"
+      value: "1"
+    - name: "Shounen"
+      value: "2"
+
+  statuses:
+    - name: "Releasing"
+      value: "releasing"
+    - name: "Finished"
+      value: "finished"
+    - name: "On hiatus"
+      value: "on_hiatus"
+    - name: "Discontinued"
+      value: "discontinued"
+    - name: "Not yet released"
+      value: "not_yet_released"
+
+  types:
+    - name: "Manga"
+      value: "manga"
+    - name: "Manhwa"
+      value: "manhwa"
+    - name: "Manhua"
+      value: "manhua"
+    - name: "Other"
+      value: "other"
+
+filters:
+  - id: sort
+    name: Sort
+    type: select
+    options:
+      - name: "Best match"
+        value: "relevance:desc"
+      - name: "Latest update"
+        value: "chapter_updated_at:desc"
+      - name: "Recently added"
+        value: "created_at:desc"
+      - name: "Title (A-Z)"
+        value: "title:asc"
+      - name: "Title (Z-A)"
+        value: "title:desc"
+      - name: "Year (newest)"
+        value: "year:desc"
+      - name: "Year (oldest)"
+        value: "year:asc"
+      - name: "Highest rated"
+        value: "score:desc"
+      - name: "Most viewed - 7 days"
+        value: "views_7d:desc"
+      - name: "Most viewed - 30 days"
+        value: "views_30d:desc"
+      - name: "Most viewed - all time"
+        value: "views_total:desc"
+      - name: "Most followed"
+        value: "follows_total:desc"
+    default:
+      name: "Best match"
+      value: "relevance:desc"
+
+  # The site takes a comma-separated list and treats it as the set of ratings to
+  # show, so each option spells out the whole set it means.
+  - id: content_rating
+    name: Content rating
+    type: select
+    options:
+      - name: "Safe only"
+        value: "safe"
+      - name: "Up to suggestive"
+        value: "safe,suggestive"
+      - name: "Up to erotica"
+        value: "safe,suggestive,erotica"
+        nsfw: true
+      - name: "Everything"
+        value: "safe,suggestive,erotica,pornographic"
+        nsfw: true
+    default:
+      name: "Up to suggestive"
+      value: "safe,suggestive"
+
+  - id: types
+    name: Type
+    type: multiselect
+    options_ref: types
+
+  - id: statuses
+    name: Status
+    type: multiselect
+    options_ref: statuses
+
+  - id: demographics
+    name: Demographic
+    type: multiselect
+    options_ref: demographics
+
+  - id: genres_include
+    name: Genres include
+    type: multiselect
+    options_ref: genres
+
+  - id: genres_exclude
+    name: Genres exclude
+    type: multiselect
+    options_ref: genres
+
+  # Genres and formats are one namespace on the wire — both map to
+  # `genres_in[]` / `genres_ex[]` — but the site presents them separately.
+  - id: formats_include
+    name: Formats include
+    type: multiselect
+    options_ref: formats
+
+  - id: formats_exclude
+    name: Formats exclude
+    type: multiselect
+    options_ref: formats
+
+  - id: genres_mode
+    name: Match genres and formats
+    type: select
+    options:
+      - name: "All of them (AND)"
+        value: "and"
+      - name: "Any of them (OR)"
+        value: "or"
+    default:
+      name: "All of them (AND)"
+      value: "and"
+
+  - id: min_chapters
+    name: Minimum chapters
+    type: text_input
+
+  - id: year_range
+    name: Release year
+    type: int_range
+    min: 1928
+    max: 2027
+
+preferences:
+  - key: cover_size
+    label: "Cover size"
+    kind: select
+    options:
+      - name: "Medium"
+        value: "medium"
+      - name: "Large"
+        value: "large"
+    default: "large"
+    description: "Which of the source's two cover renditions to request."
+
+  - key: alt_titles_in_description
+    label: "Show alternative names in the description"
+    kind: toggle
+    default: "false"
+
+  - key: extra_info_in_description
+    label: "Show year, rating, and follower count in the description"
+    kind: toggle
+    default: "true"
+
+  - key: tags_in_genres
+    label: "Show narrative tags alongside genres"
+    kind: toggle
+    default: "false"
+    description: >-
+      The site keeps a long list of narrative tags (Time Travel, Vampires, …)
+      separately from its genres and does not show them on the title page.

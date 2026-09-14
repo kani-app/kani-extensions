@@ -45,7 +45,7 @@ impl MangaDex {
         ExtensionMetadata {
             id: "mangadex".to_string(),
             name: "MangaDex".to_string(),
-            version: ext_version!("0.1.0"),
+            version: ext_version!("0.1.1"),
             base_url: "https://api.mangadex.org".to_string(),
             language: "multi".to_string(),
             nsfw: false,
@@ -572,10 +572,14 @@ impl MangaExtension for MangaDex {
                     .add(Expr::json_root("/limit").int_val().fallback(Expr::num(0.0)))
                     .lt(Expr::json_root("/total").int_val().fallback(Expr::num(0.0))),
             )
+            .scalar_opt("total", Expr::json_root("/total").int_val())
             .build();
 
         let rows = extract::json(None, &bp)?;
         let has_next_page = rows.get_scalar_bool("has_next_page");
+        let total_pages = rows
+            .get_scalar_i64("total")
+            .map(|total| (total.clamp(0, 10_000) as u32).div_ceil(limit.max(1) as u32));
         let count = rows.rows_len();
 
         let chapters = (0..count)
@@ -597,7 +601,7 @@ impl MangaExtension for MangaDex {
         Ok(ChapterList {
             chapters,
             has_next_page,
-            total_pages: None,
+            total_pages,
         })
     }
 
