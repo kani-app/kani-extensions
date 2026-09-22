@@ -1,6 +1,6 @@
 # Kani extensions
 
-Source extensions for [Kani](https://github.com/ArloB/kani), built as WASM
+Source extensions for [Kani](https://github.com/kani-app/kani), built as WASM
 components against the `kani-extension` WIT world.
 
 They live here rather than in the server repository so that the server is

@@ -10,7 +10,7 @@ unwrap_used = { level = "deny", priority = 1 }
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kani-shared = { git = "https://github.com/ArloB/kani", branch = "develop", features = ["meta"] }
+kani-shared = { git = "https://github.com/kani-app/kani", branch = "develop", features = ["meta"] }
 
 [package.metadata]
 id = "mangapill-gen"

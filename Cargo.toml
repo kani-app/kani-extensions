@@ -53,5 +53,5 @@ unwrap_used = { level = "deny", priority = 1 }
 #
 # Stage 4 publishes kani-shared, replacing the git dependency with a version one
 # and removing the need for either this or a sibling checkout.
-[patch."https://github.com/ArloB/kani"]
+[patch."https://github.com/kani-app/kani"]
 kani-shared = { path = "../kani/kani-shared" }

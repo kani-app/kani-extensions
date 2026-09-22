@@ -13,4 +13,4 @@ id = "weebcentral"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-kani-shared = { git = "https://github.com/ArloB/kani", branch = "develop", features = ["builder"] }
+kani-shared = { git = "https://github.com/kani-app/kani", branch = "develop", features = ["builder"] }
