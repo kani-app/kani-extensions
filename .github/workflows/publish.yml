@@ -1,0 +1,217 @@
+name: Build and publish
+
+# Pull requests build and validate every extension. A push to main does the same, then lists
+# the extensions whose version is newer than the live repository; publishing them waits for
+# approval on the `extension-repo` environment, which holds every secret.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      kani_tag:
+        description: Kani release to build and publish with (default the newest)
+        required: false
+      dry_run:
+        description: Sign locally and show the sync without writing to the server
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      kani_tag: ${{ steps.kani.outputs.tag }}
+      pending: ${{ steps.plan.outputs.pending }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: kani-extensions
+          persist-credentials: false
+
+      - name: Choose the Kani release
+        id: kani
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED: ${{ inputs.kani_tag }}
+        run: |
+          tag="${REQUESTED:-$(gh api 'repos/kani-app/kani/releases?per_page=1' -q '.[0].tag_name')}"
+          [ -n "$tag" ] || { echo "::error::no Kani release found"; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building with Kani $tag" >> "$GITHUB_STEP_SUMMARY"
+
+      # The workspace [patch] builds kani-shared from ../kani, so the source must match the CLI.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: kani-app/kani
+          ref: ${{ steps.kani.outputs.tag }}
+          path: kani
+          persist-credentials: false
+
+      - name: Install kani-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.kani.outputs.tag }}
+        run: bash kani-extensions/.github/scripts/install-kani-cli.sh "$TAG" "$RUNNER_TEMP/bin"
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: wasm-tools@1.259.0
+
+      # install-action has no wasm-opt package and falls back to a third-party build.
+      - name: Install wasm-opt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash kani-extensions/.github/scripts/install-wasm-opt.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: kani-extensions
+          key: ${{ steps.kani.outputs.tag }}
+
+      - name: Check crate metadata against source
+        run: python3 kani-extensions/.github/scripts/extensions.py check
+
+      - name: Build and validate
+        run: |
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          python3 kani-extensions/.github/scripts/extensions.py list > "$out/all.json"
+          jq -r '.[] | "\(.id) \(.format) \(.source)"' "$out/all.json" > "$RUNNER_TEMP/sources"
+          while read -r id format source; do
+            if [ "$format" = yaml ]; then
+              "$RUNNER_TEMP/bin/kani-cli" validate "kani-extensions/$source"
+              cp "kani-extensions/$source" "$out/$id.yaml"
+            else
+              "$RUNNER_TEMP/bin/kani-cli" build "$source" \
+                --ext-dir kani-extensions --out-dir "$out"
+              [ -f "$out/$id.wasm" ] || { echo "::error::$source did not produce $id.wasm"; exit 1; }
+            fi
+          done < "$RUNNER_TEMP/sources"
+
+      - name: Replay recorded responses
+        run: bash kani-extensions/.github/scripts/replay-fixtures.sh "$RUNNER_TEMP/bin/kani-cli"
+
+      # `check` ships in Kani releases after 1.0.0-rc.4; until then this step reports and skips.
+      - name: Check artifacts the way Kani installs them
+        env:
+          TAG: ${{ steps.kani.outputs.tag }}
+        run: |
+          cli="$RUNNER_TEMP/bin/kani-cli"
+          if ! "$cli" check --help > /dev/null 2>&1; then
+            echo "::notice::kani-cli $TAG has no check command; skipping"
+            exit 0
+          fi
+          for artifact in "$RUNNER_TEMP"/out/*.yaml "$RUNNER_TEMP"/out/*.wasm; do
+            "$cli" check "$artifact"
+          done
+
+      - name: List versions newer than the live repository
+        id: plan
+        if: github.event_name != 'pull_request'
+        env:
+          INDEX_URL: ${{ secrets.KANI_REPO_INDEX_URL }}
+        run: |
+          out="$RUNNER_TEMP/out"
+          index_args=()
+          if [ -n "$INDEX_URL" ] && curl -fsS --max-time 30 "$INDEX_URL" -o "$RUNNER_TEMP/live.json"; then
+            index_args=(--index "$RUNNER_TEMP/live.json")
+          else
+            echo "::warning::live index unavailable; every extension is a candidate and the deploy job decides"
+          fi
+          python3 kani-extensions/.github/scripts/extensions.py pending "${index_args[@]}" > "$out/pending.json"
+          echo "pending=$(cat "$out/pending.json")" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Versions to publish"
+            jq -r 'if length == 0 then "None" else .[] | "- \(.id) \(.version) (\(.format))" end' "$out/pending.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: github.event_name != 'pull_request'
+        with:
+          name: extensions
+          path: ${{ runner.temp }}/out
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    needs: build
+    if: >-
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      && needs.build.outputs.pending != '[]'
+    runs-on: ubuntu-24.04
+    environment: extension-repo
+    concurrency:
+      group: extension-repo
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: kani-extensions
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: extensions
+          path: ${{ runner.temp }}/out
+
+      - name: Install kani-cli
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.kani_tag }}
+        run: bash kani-extensions/.github/scripts/install-kani-cli.sh "$TAG" "$RUNNER_TEMP/bin"
+
+      # Secrets reach disk only under a 077 umask in the runner's temp directory.
+      - name: Write keys
+        env:
+          AUTHOR_KEY: ${{ secrets.KANI_AUTHOR_KEY }}
+          MAINTAINER_KEY: ${{ secrets.KANI_MAINTAINER_KEY }}
+          SSH_KEY: ${{ secrets.KANI_REPO_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.KANI_REPO_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          keys="$RUNNER_TEMP/keys"
+          mkdir -p "$keys"
+          for pair in AUTHOR_KEY:KANI_AUTHOR_KEY MAINTAINER_KEY:KANI_MAINTAINER_KEY \
+                      SSH_KEY:KANI_REPO_SSH_KEY KNOWN_HOSTS:KANI_REPO_KNOWN_HOSTS; do
+            var="${pair%%:*}"
+            [ -n "${!var}" ] || { echo "::error::secret ${pair#*:} is not set"; exit 1; }
+          done
+          printf '%s\n' "$AUTHOR_KEY" > "$keys/author.key"
+          printf '%s\n' "$MAINTAINER_KEY" > "$keys/maintainer.key"
+          printf '%s\n' "$SSH_KEY" > "$keys/ssh.key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$keys/known_hosts"
+
+      - name: Publish and deploy
+        env:
+          KANI_CLI: ${{ runner.temp }}/bin/kani-cli
+          ARTIFACT_DIR: ${{ runner.temp }}/out
+          WORK_DIR: ${{ runner.temp }}/work
+          AUTHOR_KEY_FILE: ${{ runner.temp }}/keys/author.key
+          MAINTAINER_KEY_FILE: ${{ runner.temp }}/keys/maintainer.key
+          SSH_KEY_FILE: ${{ runner.temp }}/keys/ssh.key
+          KNOWN_HOSTS_FILE: ${{ runner.temp }}/keys/known_hosts
+          REPO_HOST: ${{ secrets.KANI_REPO_HOST }}
+          REPO_REMOTE_DIR: ${{ secrets.KANI_REPO_REMOTE_DIR }}
+          REPO_PORT: ${{ secrets.KANI_REPO_PORT }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: bash kani-extensions/.github/scripts/deploy.sh
+
+      - name: Remove keys
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/keys"

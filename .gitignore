@@ -5,3 +5,4 @@ wasm_sources
 # git dependency or the sibling [patch]. Committing it makes a stale pin
 # outlive the switch between them.
 Cargo.lock
+__pycache__/
