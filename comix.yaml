@@ -1,6 +1,6 @@
 id: comix
 name: Comix
-version: "1.2.0"
+version: "1.2.1"
 base_url: "https://comix.to"
 mihon_source_id: 7537715367149829912
 language: en
@@ -72,6 +72,11 @@ browser_scripts:
             }
         }, 250);
     })();
+
+# The substitution material harvested from the site's JavaScript, kept for a week.
+cache:
+  cipher:
+    ttl: 604800
 
 scripts:
   pure:
