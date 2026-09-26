@@ -94,6 +94,29 @@ The run can be started by hand from the Actions tab, optionally naming a Kani
 release, with `dry_run` to sign locally and show the sync without writing to the
 server.
 
+### Recorded responses
+
+`tests/<id>/<endpoint>.har` is a recorded response for a YAML extension, and
+`tests/<id>/<endpoint>.expected.json` is the rows the extension should extract
+from it. CI replays every pair with `kani-cli repl replay`. That catches an edit
+that breaks extraction, not a change on the site, and not request signing, since
+hooks have already run on a recorded body.
+
+To record one, run the solver image and point `kani-cli` at it (the URL needs
+the `/v1`):
+
+```bash
+docker run -d -p 127.0.0.1:8191:8191 ghcr.io/kani-app/flaresolverr
+KANI_SOLVER_URL=http://127.0.0.1:8191/v1 \
+  kani-cli repl record comix.yaml popular page=1 -o tests/comix/popular.har
+```
+
+Trim what you commit: cut lists to a few entries and replace long text such as
+synopses with a placeholder. The fixture only has to exercise the extraction, and
+this repository should not carry the site's content. To write the expected
+file, replay against `{"rows":[],"scalars":{}}` and save the "actual" block
+after checking it.
+
 ### One-time setup
 
 - An `extension-repo` environment with a required reviewer, and deployments

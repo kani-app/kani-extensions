@@ -104,6 +104,23 @@ jobs:
             fi
           done < "$RUNNER_TEMP/sources"
 
+      - name: Replay recorded responses
+        run: bash kani-extensions/.github/scripts/replay-fixtures.sh "$RUNNER_TEMP/bin/kani-cli"
+
+      # `check` ships in Kani releases after 1.0.0-rc.4; until then this step reports and skips.
+      - name: Check artifacts the way Kani installs them
+        env:
+          TAG: ${{ steps.kani.outputs.tag }}
+        run: |
+          cli="$RUNNER_TEMP/bin/kani-cli"
+          if ! "$cli" check --help > /dev/null 2>&1; then
+            echo "::notice::kani-cli $TAG has no check command; skipping"
+            exit 0
+          fi
+          for artifact in "$RUNNER_TEMP"/out/*.yaml "$RUNNER_TEMP"/out/*.wasm; do
+            "$cli" check "$artifact"
+          done
+
       - name: List versions newer than the live repository
         id: plan
         if: github.event_name != 'pull_request'
