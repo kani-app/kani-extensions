@@ -204,11 +204,14 @@ jobs:
           MAINTAINER_KEY_FILE: ${{ runner.temp }}/keys/maintainer.key
           SSH_KEY_FILE: ${{ runner.temp }}/keys/ssh.key
           KNOWN_HOSTS_FILE: ${{ github.workspace }}/kani-extensions/.github/known_hosts
-          REPO_HOST: ${{ secrets.KANI_REPO_HOST || vars.KANI_REPO_HOST || 'ubuntu@152.67.127.230' }}
-          REPO_REMOTE_DIR: ${{ secrets.KANI_REPO_REMOTE_DIR || vars.KANI_REPO_REMOTE_DIR || '/srv/kani-repo' }}
-          REPO_PORT: ${{ secrets.KANI_REPO_PORT || vars.KANI_REPO_PORT }}
+          REPO_HOST: ${{ vars.KANI_REPO_HOST }}
+          REPO_REMOTE_DIR: ${{ vars.KANI_REPO_REMOTE_DIR }}
+          REPO_PORT: ${{ vars.KANI_REPO_PORT }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
-        run: bash kani-extensions/.github/scripts/deploy.sh
+        run: |
+          [ -n "$REPO_HOST" ] || { echo "::error::extension-repo variable KANI_REPO_HOST is missing"; exit 1; }
+          [ -n "$REPO_REMOTE_DIR" ] || { echo "::error::extension-repo variable KANI_REPO_REMOTE_DIR is missing"; exit 1; }
+          bash kani-extensions/.github/scripts/deploy.sh
 
       - name: Remove keys
         if: always()
