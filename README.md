@@ -68,6 +68,46 @@ sources the DSL can express; reach for a crate only when it cannot.
 cargo run -p kani-cli -- validate my-source.yaml
 ```
 
+## Publishing
+
+`.github/workflows/publish.yml` builds and validates every extension on each
+pull request with the newest Kani release's `kani-cli`, building against that
+release's `kani-shared`. A push to `main` does the same, then lists the
+extensions whose version is newer than the live repository. A maintainer
+approves the `extension-repo` environment, and the deploy job then:
+
+1. pulls the live repository and verifies it against the pinned
+   `.github/maintainer.pub`;
+2. signs each newer artifact into it, refusing to overwrite a version that
+   already exists;
+3. verifies it again, syncs it back, and confirms the server's `index.json`
+   matches.
+
+To release an extension, bump its version and merge. For a crate, the version,
+`id` and `name` in `Cargo.toml` must match `metadata()` in its source; CI checks
+this. A crate that should not be published sets `repo = false` under
+`[package.metadata]`. Each published extension's `min_kani_version` is the
+release it was built with, so an extension that needs unreleased host features
+cannot be published until Kani ships them.
+
+The run can be started by hand from the Actions tab, optionally naming a Kani
+release, with `dry_run` to sign locally and show the sync without writing to the
+server.
+
+### One-time setup
+
+- An `extension-repo` environment with a required reviewer, and deployments
+  limited to `main`.
+- Environment secrets:
+  - `KANI_AUTHOR_KEY` and `KANI_MAINTAINER_KEY`: the signing keys;
+  - `KANI_REPO_SSH_KEY`: the SSH private key for the server;
+  - `KANI_REPO_KNOWN_HOSTS`: the server's host key line (connections are refused
+    without it);
+  - `KANI_REPO_HOST` (`user@host`), `KANI_REPO_REMOTE_DIR`, and optionally
+    `KANI_REPO_PORT`.
+- Optionally a repository secret `KANI_REPO_INDEX_URL`, the public `index.json`
+  URL, so the summary before approval shows exactly what will be published.
+
 ## Provenance
 
 Extracted from the Kani server repository, where these crates lived under

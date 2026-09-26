@@ -8,6 +8,7 @@ unwrap_used = { level = "deny", priority = 1 }
 
 [package.metadata]
 id = "mangadex"
+name = "MangaDex"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

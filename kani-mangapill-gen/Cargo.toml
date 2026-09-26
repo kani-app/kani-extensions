@@ -14,3 +14,5 @@ kani-shared = { git = "https://github.com/kani-app/kani", branch = "develop", fe
 
 [package.metadata]
 id = "mangapill-gen"
+name = "Mangapill"
+repo = false
