@@ -69,7 +69,15 @@ jobs:
 
       - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
         with:
-          tool: wasm-tools, wasm-opt
+          tool: wasm-tools@1.259.0
+
+      # install-action has no wasm-opt package and falls back to a third-party build.
+      - name: Install wasm-opt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash kani-extensions/.github/scripts/install-wasm-opt.sh "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
