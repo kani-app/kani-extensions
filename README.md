@@ -123,11 +123,16 @@ after checking it.
   limited to `main`.
 - Environment secrets:
   - `KANI_AUTHOR_KEY` and `KANI_MAINTAINER_KEY`: the signing keys;
-  - `KANI_REPO_SSH_KEY`: the SSH private key for the server;
-  - `KANI_REPO_KNOWN_HOSTS`: the server's host key line (connections are refused
-    without it);
-  - `KANI_REPO_HOST` (`user@host`), `KANI_REPO_REMOTE_DIR`, and optionally
-    `KANI_REPO_PORT`.
+  - `KANI_REPO_SSH_KEY`: the SSH private key for the server.
+- The workflow defaults to `ubuntu@152.67.127.230:/srv/kani-repo` on SSH port 22,
+  matching the original `kani-repo` deployment. To override it, set the
+  environment variables `KANI_REPO_HOST` (`user@host`), `KANI_REPO_REMOTE_DIR`,
+  or `KANI_REPO_PORT`. Existing secrets with these names also work and take
+  precedence over variables.
+- The server's public ED25519 host key is pinned in `.github/known_hosts`, under
+  the `kani-extension-repo` alias. Its fingerprint is
+  `SHA256:5YU6VlmZyUEBDhYVGOlAVCxHWDDHGT+hc6h+MB7mNYk`. Verify a replacement
+  key against the server before changing this file.
 - Optionally a repository secret `KANI_REPO_INDEX_URL`, the public `index.json`
   URL, so the summary before approval shows exactly what will be published.
 

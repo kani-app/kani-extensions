@@ -33,8 +33,11 @@ repo="$WORK_DIR/repo"
 # The maintainer key is pinned here rather than read from the pulled index, so an index
 # altered on the server is refused instead of being re-signed.
 maintainer_pub="$scripts/../maintainer.pub"
+# The pinned key uses a stable alias, so changing the address or port does not
+# require changing the known_hosts entry when the server's host key is unchanged.
 ssh_cmd="ssh -p ${REPO_PORT:-22} -i $SSH_KEY_FILE -o IdentitiesOnly=yes -o BatchMode=yes \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$KNOWN_HOSTS_FILE"
+  -o StrictHostKeyChecking=yes -o HostKeyAlias=kani-extension-repo \
+  -o UserKnownHostsFile=$KNOWN_HOSTS_FILE"
 
 echo "==> Pulling the live repository"
 mkdir -p "$repo"

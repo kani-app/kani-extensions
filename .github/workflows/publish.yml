@@ -182,20 +182,18 @@ jobs:
           AUTHOR_KEY: ${{ secrets.KANI_AUTHOR_KEY }}
           MAINTAINER_KEY: ${{ secrets.KANI_MAINTAINER_KEY }}
           SSH_KEY: ${{ secrets.KANI_REPO_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.KANI_REPO_KNOWN_HOSTS }}
         run: |
           umask 077
           keys="$RUNNER_TEMP/keys"
           mkdir -p "$keys"
           for pair in AUTHOR_KEY:KANI_AUTHOR_KEY MAINTAINER_KEY:KANI_MAINTAINER_KEY \
-                      SSH_KEY:KANI_REPO_SSH_KEY KNOWN_HOSTS:KANI_REPO_KNOWN_HOSTS; do
+                      SSH_KEY:KANI_REPO_SSH_KEY; do
             var="${pair%%:*}"
             [ -n "${!var}" ] || { echo "::error::secret ${pair#*:} is not set"; exit 1; }
           done
           printf '%s\n' "$AUTHOR_KEY" > "$keys/author.key"
           printf '%s\n' "$MAINTAINER_KEY" > "$keys/maintainer.key"
           printf '%s\n' "$SSH_KEY" > "$keys/ssh.key"
-          printf '%s\n' "$KNOWN_HOSTS" > "$keys/known_hosts"
 
       - name: Publish and deploy
         env:
@@ -205,10 +203,10 @@ jobs:
           AUTHOR_KEY_FILE: ${{ runner.temp }}/keys/author.key
           MAINTAINER_KEY_FILE: ${{ runner.temp }}/keys/maintainer.key
           SSH_KEY_FILE: ${{ runner.temp }}/keys/ssh.key
-          KNOWN_HOSTS_FILE: ${{ runner.temp }}/keys/known_hosts
-          REPO_HOST: ${{ secrets.KANI_REPO_HOST }}
-          REPO_REMOTE_DIR: ${{ secrets.KANI_REPO_REMOTE_DIR }}
-          REPO_PORT: ${{ secrets.KANI_REPO_PORT }}
+          KNOWN_HOSTS_FILE: ${{ github.workspace }}/kani-extensions/.github/known_hosts
+          REPO_HOST: ${{ secrets.KANI_REPO_HOST || vars.KANI_REPO_HOST || 'ubuntu@152.67.127.230' }}
+          REPO_REMOTE_DIR: ${{ secrets.KANI_REPO_REMOTE_DIR || vars.KANI_REPO_REMOTE_DIR || '/srv/kani-repo' }}
+          REPO_PORT: ${{ secrets.KANI_REPO_PORT || vars.KANI_REPO_PORT }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: bash kani-extensions/.github/scripts/deploy.sh
 
