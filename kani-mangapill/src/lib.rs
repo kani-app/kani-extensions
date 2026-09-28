@@ -38,7 +38,7 @@ impl Mangapill {
         ExtensionMetadata {
             id: "mangapill".to_string(),
             name: "Mangapill".to_string(),
-            version: ext_version!("0.1.0"),
+            version: ext_version!("0.1.1"),
             base_url: "https://mangapill.com".to_string(),
             language: "multi".to_string(),
             nsfw: false,

@@ -31,7 +31,7 @@ impl Cubari {
         ExtensionMetadata {
             id: "cubari".to_string(),
             name: "Cubari".to_string(),
-            version: ext_version!("0.1.0"),
+            version: ext_version!("0.1.1"),
             base_url: CUBARI_BASE.to_string(),
             language: "multi".to_string(),
             nsfw: false,
