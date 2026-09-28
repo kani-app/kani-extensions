@@ -42,7 +42,7 @@ impl WeebCentral {
         ExtensionMetadata {
             id: "weebcentral".to_string(),
             name: "Weeb Central".to_string(),
-            version: ext_version!("0.1.0"),
+            version: ext_version!("0.1.1"),
             base_url: "https://weebcentral.com".to_string(),
             language: "multi".to_string(),
             nsfw: false,
