@@ -45,7 +45,7 @@ impl MangaDex {
         ExtensionMetadata {
             id: "mangadex".to_string(),
             name: "MangaDex".to_string(),
-            version: ext_version!("0.1.2"),
+            version: ext_version!("0.1.3"),
             base_url: "https://api.mangadex.org".to_string(),
             language: "multi".to_string(),
             nsfw: false,
