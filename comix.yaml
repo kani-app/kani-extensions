@@ -1,6 +1,6 @@
 id: comix
 name: Comix
-version: "1.2.1"
+version: "1.3.0"
 base_url: "https://comix.to"
 mihon_source_id: 7537715367149829912
 language: en
@@ -32,23 +32,14 @@ id_encoding:
     encoding: base64_url
 
 browser_scripts:
-  harvest_cipher: |
+  site_crypto: |
     (function () {
-        var caps = [];
-        var originalAtob = window.atob.bind(window);
-        window.atob = function (value) {
-            var decoded = originalAtob(value);
-            try {
-                var bytes = [];
-                for (var i = 0; i < decoded.length; i++) {
-                    bytes.push(decoded.charCodeAt(i) & 255);
-                }
-                if (bytes.length === 256 || bytes.length === 24 || bytes.length === 32) {
-                    caps.push(bytes);
-                }
-            } catch (e) {}
-            return decoded;
-        };
+        function text(encoded) {
+            var raw = atob(encoded.replace(/-/g, '+').replace(/_/g, '/'));
+            var bytes = new Uint8Array(raw.length);
+            for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            return new TextDecoder().decode(bytes);
+        }
 
         function b64url(bytes) {
             var s = '';
@@ -56,15 +47,98 @@ browser_scripts:
             return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
         }
 
+        // The site signs and decrypts in interceptors it installs on its HTTP
+        // client, so a stand-in client collects them.
+        function interceptors(mod) {
+            var found = { request: [], response: [] };
+            var client = {
+                defaults: { baseURL: '/api/v1', headers: { common: {} } },
+                interceptors: {
+                    request: { use: function (fn) { found.request.push(fn); return 0; } },
+                    response: { use: function (fn) { found.response.push(fn); return 0; } }
+                }
+            };
+            Object.keys(mod).forEach(function (name) {
+                var installer = mod[name];
+                if (found.request.length === 0 && typeof installer === 'function' && installer.length === 1) {
+                    try { installer(client); } catch (e) {}
+                }
+            });
+            if (!found.request[0] || !found.response[0]) throw new Error('site interceptors not found');
+            return found;
+        }
+
+        async function sign(hooks, requests) {
+            var tokens = [];
+            for (var i = 0; i < requests.length; i++) {
+                var fields = requests[i].split(':').map(text);
+                var params = {};
+                for (var j = 1; j + 1 < fields.length; j += 2) params[fields[j]] = fields[j + 1];
+                var signed = await hooks.request[0]({
+                    url: fields[0], method: 'get', baseURL: '/api/v1', params: params, headers: {}
+                });
+                var token = signed && signed.params && signed.params._;
+                if (!token) throw new Error('no token for ' + fields[0]);
+                tokens.push(token);
+            }
+            return tokens.join(',');
+        }
+
+        // Responses are XORed with a repeating table, so decrypting zeros yields it.
+        // It is returned once per base64 byte phase, letting a hook cut a key that
+        // starts at any offset out of whole base64 groups.
+        async function table(hooks, version) {
+            var period = 1024;
+            var seen = null;
+            var decode = TextDecoder.prototype.decode;
+            TextDecoder.prototype.decode = function (input) {
+                if (input && input.byteLength === 2 * period) {
+                    seen = new Uint8Array(input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength));
+                }
+                return decode.apply(this, arguments);
+            };
+            try {
+                var zeros = '';
+                for (var i = 0; i < 2 * period + 2; i++) zeros += '\0';
+                await hooks.response[0]({
+                    data: { e: btoa(zeros) }, status: 200, headers: { 'x-enc': version }, config: {}
+                });
+            } catch (e) {
+            } finally {
+                TextDecoder.prototype.decode = decode;
+            }
+            if (!seen) throw new Error('response encryption version ' + version + ' not decrypted');
+            for (var k = 0; k < period; k++) {
+                if (seen[k] !== seen[k + period]) throw new Error('keystream is not a ' + period + '-byte table');
+            }
+            var phases = [];
+            for (var phase = 0; phase < 3; phase++) {
+                var bytes = new Uint8Array(5115);
+                for (var n = 0; n < bytes.length; n++) bytes[n] = seen[(phase + n) % period];
+                phases.push(b64url(bytes));
+            }
+            return phases.join('.');
+        }
+
+        // The `j` parameter is `s.<request>.<request>…` to sign, each request being
+        // `path:key:value:…`, or `k.<version>` for the response table.
+        async function run(entry) {
+            var main = await (await fetch(entry)).text();
+            var chunk = main.match(/"\.\/(secure-[^"]+\.js)"/);
+            if (!chunk) throw new Error('signing module not found in ' + entry);
+            var hooks = interceptors(await import(new URL(chunk[1], entry).href));
+            var job = (new URLSearchParams(location.search).get('j') || '').split('.');
+            if (job[0] === 's') return sign(hooks, job.slice(1));
+            if (job[0] === 'k') return table(hooks, job[1]);
+            throw new Error('unknown job ' + job[0]);
+        }
+
         var started = Date.now();
         var tick = setInterval(function () {
-            var sboxes = caps.filter(function (c) { return c.length === 256; }).slice(0, 3);
-            var keys = caps.filter(function (c) {
-                return c.length === 24 || c.length === 32;
-            }).slice(0, 3);
-            if (sboxes.length === 3 && keys.length === 3) {
+            var entry = document.querySelector('script[type="module"][src]');
+            if (entry) {
                 clearInterval(tick);
-                passPayload(sboxes.concat(keys).map(b64url).join('.'));
+                run(entry.src).then(passPayload, function (e) { passPayload('!' + e); });
             } else if (Date.now() - started > 45000) {
                 clearInterval(tick);
             } else {
@@ -73,68 +147,128 @@ browser_scripts:
         }, 250);
     })();
 
-# The substitution material harvested from the site's JavaScript, kept for a week.
+# Tokens are a fixed function of the request, and the response table of the site
+# build, so both are kept until the site rejects them.
 cache:
-  cipher:
-    ttl: 604800
+  tokens:
+    ttl: 2592000
+  tables:
+    ttl: 2592000
 
 scripts:
   pure:
-    comix_canonical: |
-      fn comix_canonical(path, queries) {
+    comix_pairs: |
+      fn comix_pairs(queries) {
           let flat = [];
           let counters = #{};
           for pair in queries {
               let k = pair[0];
+              if k == "_" { continue; }
               if k.ends_with("[]") {
                   let base = k.sub_string(0, k.len() - 2);
                   let n = if counters.contains(base) { counters[base] } else { 0 };
                   counters[base] = n + 1;
-                  flat.push(base + "[" + n + "]=" + pair[1]);
+                  flat.push([base + "[" + n + "]", pair[1]]);
               } else {
-                  flat.push(k + "=" + pair[1]);
+                  flat.push([k, pair[1]]);
               }
           }
+          flat
+      }
+
+    comix_canonical: |
+      fn comix_canonical(path, pairs) {
+          let flat = [];
+          for pair in pairs { flat.push(pair[0] + "=" + pair[1]); }
           flat.sort(|a, b| if a < b { -1 } else if a > b { 1 } else { 0 });
           let qs = "";
           for part in flat { qs = if qs == "" { part } else { qs + "&" + part }; }
           if qs == "" { path } else { path + "?" + qs }
       }
 
-    comix_material: |
-      fn comix_material(ctx) {
-          let raw = ctx.cache_get("cipher", "material");
+    comix_capture: |
+      fn comix_capture(ctx, job) {
+          let raw = ctx.capture_page_payload("https://comix.to/browse?j=" + job, "site_crypto", 45000, false);
+          if raw.starts_with("!") { throw "comix: " + raw.sub_string(1); }
+          raw
+      }
+
+    comix_token: |
+      fn comix_token(ctx, path, queries) {
+          let pairs = comix_pairs(queries);
+          let token = ctx.cache_get("tokens", comix_canonical(path, pairs));
+          if token != () { return token; }
+
+          // One browser visit also signs the pages that follow this one.
+          let batch = [pairs];
+          let page = ();
+          for pair in pairs { if pair[0] == "page" { page = parse_int(pair[1]); } }
+          if page != () {
+              for ahead in 1..8 {
+                  let next = [];
+                  for pair in pairs {
+                      next.push(if pair[0] == "page" { ["page", (page + ahead).to_string()] } else { pair });
+                  }
+                  batch.push(next);
+              }
+          }
+
+          let job = "s";
+          for request in batch {
+              job += "." + bytes_to_base64url(bytes_from_utf8(path));
+              for pair in request {
+                  job += ":" + bytes_to_base64url(bytes_from_utf8(pair[0]));
+                  job += ":" + bytes_to_base64url(bytes_from_utf8(pair[1]));
+              }
+          }
+          let tokens = comix_capture(ctx, job).split(",");
+          if tokens.len() != batch.len() { throw "comix: signer returned " + tokens.len() + " tokens"; }
+          for i in 0..batch.len() {
+              ctx.cache_put("tokens", comix_canonical(path, batch[i]), tokens[i], 2592000);
+          }
+          tokens[0]
+      }
+
+    comix_table: |
+      fn comix_table(ctx, key, version) {
+          let raw = ctx.cache_get("tables", key);
           if raw == () {
-              raw = ctx.capture_page_payload(
-                  "https://comix.to/browse", "harvest_cipher", 45000, false
-              );
-              ctx.cache_put("cipher", "material", raw, 604800);
+              raw = comix_capture(ctx, "k." + version);
+              ctx.cache_put("tables", key, raw, 2592000);
           }
-          let out = [];
-          for part in raw.split(".") { out.push(bytes_from_base64url(part)); }
-          out
+          raw.split(".")
       }
 
-    comix_sign: |
-      fn comix_sign(material, canonical) {
-          let seeds = [189, 133, 32];
-          let data = bytes_from_utf8(canonical);
-          for round in 0..3 {
-              data = bytes_substitute(data, material[round], material[round + 3], seeds[round], false);
-          }
-          bytes_to_base64url(data)
-      }
-
+    # A payload is two bytes locating the key in the table, then the body XORed
+    # with it. The third byte is cut with them to stay on a base64 boundary; it is
+    # always the opening brace.
     comix_decrypt: |
-      fn comix_decrypt(material, payload) {
-          let seeds = [189, 133, 32];
-          let data = bytes_from_base64url(payload);
-          let round = 2;
-          while round >= 0 {
-              data = bytes_substitute(data, material[round], material[round + 3], seeds[round], true);
-              round -= 1;
-          }
-          bytes_to_utf8(data)
+      fn comix_decrypt(phases, payload) {
+          let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+          let a = alphabet.index_of(payload.sub_string(0, 1));
+          let b = alphabet.index_of(payload.sub_string(1, 1));
+          let c = alphabet.index_of(payload.sub_string(2, 1));
+          let high = (a * 4 + b / 16) % 4;
+          let low = (b % 16) * 16 + c / 4;
+          let offset = (high * 256 + low + 1) % 1024;
+          let key = bytes_from_base64url(phases[offset % 3].sub_string(offset / 3 * 4, 4096));
+
+          let body = payload.sub_string(4);
+          body.replace("+", "-");
+          body.replace("/", "_");
+          body.replace("=", "");
+
+          // An identity table turns two substitution rounds into a plain XOR: the
+          // first folds each byte into the next, the second unfolds them with the key.
+          let identity = bytes_from_base64url("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn-AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq-wsbKztLW2t7i5uru8vb6_wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t_g4eLj5OXm5-jp6uvs7e7v8PHy8_T19vf4-fr7_P3-_w");
+          let folded = bytes_substitute(bytes_from_base64url(body), identity, bytes_from_base64url("AA"), 0, false);
+          "{" + bytes_to_utf8(bytes_substitute(folded, identity, key, 0, true))
+      }
+
+    comix_path: |
+      fn comix_path(url) {
+          let marker = url.index_of("/api/v1");
+          if marker >= 0 { url.sub_string(marker + 7) } else { url }
       }
 
 pre_request: |
@@ -158,28 +292,33 @@ pre_request: |
       req.push_query("order[" + bits[0] + "]", direction);
   }
 
-  let marker = req.url.index_of("/api/v1");
-  let path = if marker >= 0 { req.url.sub_string(marker + 7) } else { req.url };
-  req.push_query("_", comix_sign(comix_material(ctx), comix_canonical(path, req.queries)));
+  req.push_query("_", comix_token(ctx, comix_path(req.url), req.queries));
   proceed()
 
 on_status:
   "2xx": |
-    let marker = resp.body.index_of("\"e\"");
-    if marker >= 0 {
-        let open = resp.body.index_of("\"", marker + 3);
-        if open >= 0 {
-            let close = resp.body.index_of("\"", open + 1);
-            if close > open {
-                let payload = resp.body.sub_string(open + 1, close - open - 1);
-                resp.body = comix_decrypt(comix_material(ctx), payload);
-            }
-        }
+    if !resp.body.starts_with("{\"e\":\"") { return proceed(); }
+
+    let version = resp.headers["x-enc"];
+    let build = resp.headers["x-build-id"];
+    if version == () { version = ""; }
+    if build == () { build = ""; }
+    let key = version + "|" + build;
+    let phases = comix_table(ctx, key, version);
+
+    let close = resp.body.index_of("\"", 6);
+    let plain = "";
+    try { plain = comix_decrypt(phases, resp.body.sub_string(6, close - 6)); } catch {}
+    if !plain.starts_with("{\"") {
+        ctx.cache_delete("tables", key);
+        return retry();
     }
+    resp.body = plain;
     proceed()
 
   "403": |
-    ctx.cache_delete("cipher", "material");
+    if !resp.body.contains("invalid_token") { return proceed(); }
+    ctx.cache_delete("tokens", comix_canonical(comix_path(req.url), comix_pairs(req.queries)));
     retry()
 
 endpoints:
