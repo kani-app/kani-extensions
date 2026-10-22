@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "kani-atsumaru",
     "kani-cubari",
+    "kani-mangaball",
     "kani-mangadex",
     "kani-mangapill",
     "kani-mangapill-gen",
