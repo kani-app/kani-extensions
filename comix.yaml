@@ -1,6 +1,6 @@
 id: comix
 name: Comix
-version: "1.3.0"
+version: "1.3.1"
 base_url: "https://comix.to"
 mihon_source_id: 7537715367149829912
 language: en
@@ -13,7 +13,8 @@ get_url: "/title/$manga.slug$"
 
 metadata:
   description: >-
-    Aggregator with a large multi-language catalogue.
+    Deprecated: comix.to stopped allowing third-party apps in October 2026, so this source no
+    longer loads. Move your titles to another source.
   languages:
     - en
   rate_limit:
@@ -186,10 +187,16 @@ scripts:
           if qs == "" { path } else { path + "?" + qs }
       }
 
+    comix_retired: |
+      fn comix_retired(detail) {
+          "comix.to no longer allows third-party apps, so this source is deprecated. "
+              + "Move your titles to another source. (" + detail + ")"
+      }
+
     comix_capture: |
       fn comix_capture(ctx, job) {
           let raw = ctx.capture_page_payload("https://comix.to/browse?j=" + job, "site_crypto", 45000, false);
-          if raw.starts_with("!") { throw "comix: " + raw.sub_string(1); }
+          if raw.starts_with("!") { throw comix_retired("signer: " + raw.sub_string(1)); }
           raw
       }
 
@@ -317,6 +324,9 @@ on_status:
     proceed()
 
   "403": |
+    for code in ["third_party_app", "key_retired", "captcha_required"] {
+        if resp.body.contains("\"" + code + "\"") { throw comix_retired("HTTP 403 " + code); }
+    }
     if !resp.body.contains("invalid_token") { return proceed(); }
     ctx.cache_delete("tokens", comix_canonical(comix_path(req.url), comix_pairs(req.queries)));
     retry()
