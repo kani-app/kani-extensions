@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "kani-atsumaru",
     "kani-cubari",
     "kani-mangadex",
     "kani-mangapill",
